@@ -1,0 +1,104 @@
+name: Release Windows x64
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release
+
+      - name: Smoke test binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          & .\build\Release\WfpProcessSandbox.exe 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 2) {
+              throw "WfpProcessSandbox.exe returned unexpected exit code $LASTEXITCODE"
+          }
+
+          & .\build\Release\WfpTestClient.exe 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 2) {
+              throw "WfpTestClient.exe returned unexpected exit code $LASTEXITCODE"
+          }
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = $env:GITHUB_REF_NAME
+          $packageName = "windows-wfp-process-sandbox-$tag-win-x64"
+          $distDir = Join-Path $PWD "dist"
+          $packageDir = Join-Path $distDir $packageName
+          $docsDir = Join-Path $packageDir "docs"
+
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+
+          Copy-Item ".\build\Release\WfpProcessSandbox.exe" $packageDir
+          Copy-Item ".\build\Release\WfpTestClient.exe" $packageDir
+          Copy-Item ".\README.md" $packageDir
+          Copy-Item ".\LICENSE" $packageDir
+          Copy-Item ".\docs\validation-results.md" $docsDir
+
+          $zipPath = Join-Path $distDir "$packageName.zip"
+          Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -Force
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          "$hash  $packageName.zip" | Set-Content -Encoding ascii (Join-Path $distDir "SHA256SUMS.txt")
+
+          Write-Host "PACKAGE_PATH=$zipPath"
+          Write-Host "SHA256=$hash"
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = $env:GITHUB_REF_NAME
+          $packageName = "windows-wfp-process-sandbox-$tag-win-x64"
+          $zipPath = ".\dist\$packageName.zip"
+          $checksumPath = ".\dist\SHA256SUMS.txt"
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if ($releaseExists) {
+              gh release upload $tag $zipPath $checksumPath --clobber --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) {
+                  throw "gh release upload failed with exit code $LASTEXITCODE"
+              }
+          } else {
+              gh release create $tag $zipPath $checksumPath `
+                  --title $tag `
+                  --generate-notes `
+                  --verify-tag `
+                  --repo $env:GITHUB_REPOSITORY
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "gh release create failed with exit code $LASTEXITCODE"
+              }
+          }
