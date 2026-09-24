@@ -7,7 +7,7 @@ Date: 2026-09-24
 Windows Filtering Platform（WFP）を使用して、Windows上でCodexを動作させる際に、
 
 - Codex自身に必要なTCP通信は許可する
-- Codexが起動した別プロセスのTCP通信は遮断する
+- Codexのallowed APP_IDとは異なるAPP_IDを持つプロセスのTCP通信は遮断する
 - Windows全体の通信には影響させない
 - Controller異常終了時にもFilterを残留させない
 
@@ -96,7 +96,7 @@ FWPM_SESSION_FLAG_DYNAMIC
 
 ## Phase 2
 
-Phase 2では専用Windowsユーザーを隔離境界とし、指定したallowed applicationだけTCPを許可した。
+Phase 2では専用Windowsユーザーを隔離境界とし、指定したallowed APP_IDだけTCPを許可した。同じallowed executable path / APP_IDを使う別processもPERMIT条件に一致するため、PID単位・process tree単位の隔離は主張しない。
 
 同一Sublayer内に以下を配置した。
 
@@ -865,7 +865,7 @@ Codex
   -> curl.exe
   -> TCP BLOCK
 
-Codex
+Dedicated user
   -> copied / alternate executable
   -> TCP BLOCK
 ```
@@ -923,7 +923,7 @@ Explicit allowed application
 
 を組み合わせることで、今回必要としていた範囲のTCP isolationは実現できた。
 
-特にCodex自身に必要な通信を維持しながら、Codexが起動する別processのTCP通信を遮断できた点を、本PoCの主要成果とする。
+特にCodex自身に必要な通信を維持しながら、同じDedicated Windows User配下のallowed APP_IDとは異なるAPP_IDを持つprocessのTCP通信を遮断できた点を、本PoCの主要成果とする。
 
 ---
 
@@ -1028,7 +1028,7 @@ WFP Dynamic Session
 + explicit allowed application permit
 ```
 
-を使用することで、Codex自身に必要なTCP通信を維持しながら、同一Dedicated User配下の子プロセスや別実行ファイルによるTCP通信を遮断できることを実機で確認した。
+を使用することで、Codex自身に必要なTCP通信を維持しながら、同一Dedicated User配下のallowed APP_IDとは異なるAPP_IDを持つ子プロセスや別実行ファイルによるTCP通信を遮断できることを実機で確認した。同じallowed executable path / APP_IDを使う別processはPERMIT対象になるため、本PoCはPID単位・process tree単位の隔離を主張しない。
 
 今回定義した脅威モデルに対する技術的成立性は確認済みとする。
 
