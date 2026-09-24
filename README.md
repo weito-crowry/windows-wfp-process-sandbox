@@ -2,25 +2,40 @@
 
 ## Purpose
 
-This PoC checks whether Windows Filtering Platform (WFP) user-mode management APIs can block outbound TCP connection authorization for one executable path. It observes IPv4, IPv6, loopback, unrelated processes, child-process escape, and dynamic-session cleanup. It is a feasibility demonstration, not a production sandbox.
+This PoC explores lightweight outbound TCP isolation on Windows using Windows Filtering Platform (WFP) user-mode management APIs. It covers two designs: Phase 1 blocks one executable path by ALE app ID; Phase 2 blocks TCP for one dedicated Windows user by default while permitting one selected app ID. The PoC validates IPv4, IPv6, loopback, unrelated-user behavior, child/copy escape behavior, Codex CLI end-to-end behavior, and dynamic-session cleanup. It is a feasibility demonstration, not a production sandbox.
+
+Detailed manual evidence is recorded in [docs/validation-results.md](docs/validation-results.md).
 
 ## Architecture
 
-- `WfpProcessSandbox.exe` opens one `FwpmEngineOpen0` dynamic session.
-- It creates one PoC sublayer and exactly two filters: one at `FWPM_LAYER_ALE_AUTH_CONNECT_V4`, one at `FWPM_LAYER_ALE_AUTH_CONNECT_V6`.
-- Each filter has both conditions: `FWPM_CONDITION_ALE_APP_ID` from `FwpmGetAppIdFromFileName0` using the normalized absolute executable path, and `FWPM_CONDITION_IP_PROTOCOL == IPPROTO_TCP`.
-- Both filters use `FWP_ACTION_BLOCK`. There is no provider, permit filter, callout, packet inspection, persistent filter, or other layer.
-- `run` installs filters before creating the target process, waits for its exit, reports its exit code, and closes the engine handle.
-- `hold` installs the same filters and remains active until Ctrl+C; the control handler signals the main thread to close the engine handle.
-- `WfpTestClient.exe` uses Winsock for literal IPv4/IPv6 TCP destinations, same-process loopback sockets, and a `curl.exe` child process.
+### Phase 1 — APP_ID-only block
 
-The fixed PoC sublayer GUID is `2dfa9fcd-e74e-43fe-92e7-5b78c3e93e32`.
+- `WfpProcessSandbox.exe` opens one `FwpmEngineOpen0` dynamic session.
+- It creates a PoC sublayer with one block filter at each of `FWPM_LAYER_ALE_AUTH_CONNECT_V4` and `FWPM_LAYER_ALE_AUTH_CONNECT_V6`.
+- Each filter matches `FWPM_CONDITION_ALE_APP_ID` for the target executable plus `FWPM_CONDITION_IP_PROTOCOL == IPPROTO_TCP`.
+- `run` installs the filters before creating the target process; `hold` keeps them active until Ctrl+C.
+- This design blocks every process using the same matched app ID, but a child executable or copied executable at another path has a different app ID and can escape.
+
+Phase 1 sublayer GUID: `2dfa9fcd-e74e-43fe-92e7-5b78c3e93e32`.
+
+### Phase 2 — dedicated-user deny-by-default
+
+- `user-hold` resolves the supplied Windows user to a SID at runtime; no SID is hard-coded.
+- A separate Phase 2 sublayer contains four filters: IPv4/IPv6 PERMIT for `ALE_USER_ID + ALE_APP_ID + TCP`, and IPv4/IPv6 BLOCK for `ALE_USER_ID + TCP`.
+- PERMIT uses weight `0xF000000000000000`; BLOCK uses `0x1000000000000000` in the same sublayer.
+- Filter creation is wrapped in an explicit WFP transaction.
+- For the selected user, TCP from the allowed app ID is permitted; TCP from other app IDs is blocked.
+- A second process using the same allowed executable path/app ID also matches the permit rule. This PoC does not claim PID- or process-tree-specific isolation.
+
+Phase 2 sublayer GUID: `8ae41945-9f24-4e51-b356-8c3be4467e29`.
 
 ## Safety model
 
-The only policy objects this PoC adds are the dynamic-session sublayer and the two app-ID-and-TCP block filters. The session is configured with `FWPM_SESSION_FLAG_DYNAMIC`; closing the engine handle or losing the session is intended to remove its objects. No firewall policy, registry, network adapter, route, DNS, forwarding, NAT, service, driver, or persistent WFP state is changed.
+Both phases use `FWPM_SESSION_FLAG_DYNAMIC`. Closing the engine handle or losing the WFP session removes the PoC sublayer and filters. The PoC does not create persistent or boot-time filters, Windows Firewall rules, registry changes, network-adapter changes, routes, NAT, a provider, a kernel driver, or callouts.
 
-The filter is restricted to the absolute-path ALE app ID and TCP protocol. UDP, DNS, ICMP, QUIC, and other protocols are outside its match conditions. The program requires an elevated Administrator token before it attempts WFP management.
+Phase 2 is scoped to one Windows user SID and TCP at the outbound ALE connect layers. UDP, QUIC, ICMP, filesystem access, IPC, named pipes, shared memory, secrets, Protected OOS filesystem access, Administrator/kernel escape, and complete exfiltration prevention are outside scope.
+
+The controller requires an elevated Administrator token to manage WFP.
 
 ## Build requirements
 
@@ -106,7 +121,6 @@ Phase 1 results retained from the existing PoC validation:
 - copied-executable escape under APP_ID-only filtering: **CONFIRMED**
 - multiple processes from the same APP_ID path all blocked: **CONFIRMED**
 
-The Phase 2 implementation and build below do not launch either executable, start a WFP session, or perform network tests.
 
 ## Phase 1 limitations
 
@@ -135,7 +149,7 @@ The user name is resolved at runtime. No user SID is hard-coded.
 
 ### Threat model
 
-For TCP connections at the outbound ALE connect layers, the policy permits only the selected allowed-app image when it runs as the selected user. Other processes running as that same user, including child processes, alternate executables, and a copy of the allowed executable at another path, match the user-wide TCP block.
+For TCP connections at the outbound ALE connect layers, the policy permits the selected allowed-app image when it runs as the selected user. Other app IDs running as that same user, including a child executable such as `curl.exe`, alternate executables, and a copy of the allowed executable at another path, match the user-wide TCP block. Another process using the exact same allowed executable path/app ID would also match the PERMIT rule; this is not a PID- or process-tree boundary.
 
 This PoC does not protect UDP, QUIC, filesystem access, IPC, named pipes, shared memory, secrets readable by Codex, OOS data access, malicious kernel code, or against Administrator escape. It is not a complete Windows sandbox.
 
@@ -179,25 +193,38 @@ The Phase 2 BLOCK filters always include `FWPM_CONDITION_ALE_USER_ID` and `FWPM_
 7. Press Ctrl+C in the controller PowerShell to close the dynamic WFP session. After the controller exits, retry the allowed-app TCP command as `WfpCodexTest` and record whether connectivity is restored.
 8. For a separate forced-termination check, start a fresh controller session, end only that `WfpProcessSandbox.exe` controller process, then retry the allowed-app TCP command as `WfpCodexTest` and record whether connectivity is restored.
 
-### Not tested yet
+### Observed Phase 2 results
 
-- dedicated-user allowed-app TCP: **NOT RUN**
-- child curl blocking: **NOT RUN**
-- copied executable blocking: **NOT RUN**
-- unrelated-user unaffected: **NOT RUN**
-- IPv6 dedicated-user test: **NOT RUN**
-- normal Dynamic Session cleanup Phase 2: **NOT RUN**
-- forced-termination cleanup Phase 2: **NOT RUN**
-- Codex E2E: **NOT RUN**
+Manual validation on the target Windows 11 machine completed successfully for the intended PoC scope:
 
-Phase 2 configure (`cmake -S . -B build -A x64`): **PASS** — Visual Studio 18 2026 generator, x64, Windows SDK 10.0.26100.0.
+- dedicated-user allowed-app IPv4 TCP: **PASS**
+- dedicated-user allowed-app IPv6 TCP: **PASS**
+- child `curl.exe` TCP blocking: **PASS**
+- copied executable at another path blocked: **PASS**
+- unrelated Windows user unaffected: **PASS**
+- normal Dynamic Session cleanup: **PASS**
+- Phase 2 forced-termination cleanup: **NOT RUN**
 
-Phase 2 Release build (`cmake --build build --config Release`): **PASS** — exit code 0, no compile or link errors after adding the required SDK declaration header. No WfpProcessSandbox or WfpTestClient executable was launched during this work, and no WFP session or TCP test was started.
+Phase 1 forced-termination cleanup was separately observed as **PASS**.
+
+### Codex CLI E2E
+
+Codex CLI 0.156.1 was installed for the dedicated standard user and tested with the native `codex.exe` as the allowed app.
+
+- model communication without WFP: **PASS** (`CODEX_BASELINE_OK`)
+- model communication under Phase 2 WFP: **PASS** (`CODEX_WFP_OK`)
+- child `cmd.exe /d /c echo SHELL_WFP_OK`: **PASS**
+- child `curl.exe https://example.com/`: **BLOCKED**
+- Codex retry of curl "outside the sandbox": **BLOCKED**
+- Codex remained able to report the blocked result over its own model connection: **PASS**
+- after the WFP controller exited, direct `curl.exe https://example.com/` succeeded again: **PASS**
+
+The default Codex Windows sandbox could not start even a baseline shell command because of an unrelated `setup refresh had errors` condition while WFP was disabled. The final WFP E2E therefore used `--sandbox danger-full-access` only to remove that unrelated variable; this is not a production recommendation.
 
 ### Limitations
 
-The manual network results remain unknown until tested on the target Windows machine. The policy covers TCP authorization only at the two ALE connect layers, matches the allowed executable by its WFP app ID, and relies on the dynamic session remaining active. It does not track process trees or isolate files, IPC, or other operating-system resources.
+The policy covers TCP authorization only at the two ALE connect layers, matches the permitted executable by WFP app ID, and relies on the dynamic session remaining active. It does not track process trees, distinguish different processes sharing the same allowed app ID, or isolate files, IPC, UDP/QUIC, credentials, or other operating-system resources. Phase 2 forced-termination cleanup was not separately re-run.
 
 ## Conclusion
 
-Phase 1 results remain recorded above. Phase 2 has been implemented and built, while all Phase 2 network and dedicated-user experiments remain **NOT RUN** for manual execution.
+Phase 1 showed that APP_ID-only filtering can block direct IPv4/IPv6 TCP (including loopback) but is not a sufficient security boundary because child executables and copied executables can escape. Phase 2 demonstrated that a dedicated Windows user plus user-wide TCP BLOCK and an explicit allowed-app PERMIT can keep Codex model communication working while blocking TCP from other app IDs under that dedicated user. The tested PoC scope is complete; it should not be interpreted as a complete Windows sandbox.
