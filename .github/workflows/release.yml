@@ -32,14 +32,18 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          & .\build\Release\WfpProcessSandbox.exe 2>&1 | Out-Host
-          if ($LASTEXITCODE -ne 2) {
-              throw "WfpProcessSandbox.exe returned unexpected exit code $LASTEXITCODE"
+          $controller = Start-Process `
+              -FilePath ".\build\Release\WfpProcessSandbox.exe" `
+              -NoNewWindow -Wait -PassThru
+          if ($controller.ExitCode -ne 2) {
+              throw "WfpProcessSandbox.exe returned unexpected exit code $($controller.ExitCode)"
           }
 
-          & .\build\Release\WfpTestClient.exe 2>&1 | Out-Host
-          if ($LASTEXITCODE -ne 2) {
-              throw "WfpTestClient.exe returned unexpected exit code $LASTEXITCODE"
+          $client = Start-Process `
+              -FilePath ".\build\Release\WfpTestClient.exe" `
+              -NoNewWindow -Wait -PassThru
+          if ($client.ExitCode -ne 2) {
+              throw "WfpTestClient.exe returned unexpected exit code $($client.ExitCode)"
           }
 
       - name: Package release
